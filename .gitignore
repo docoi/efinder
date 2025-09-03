@@ -1,0 +1,21 @@
+# Node modules
+node_modules/
+
+# Vercel / build
+.vercel/
+.next/
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env files
+.env
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db

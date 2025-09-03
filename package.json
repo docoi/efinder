@@ -1,0 +1,12 @@
+{
+  "name": "leads4ig",
+  "scripts": {
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "lucide-react": "^0.542.0",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  }
+}
