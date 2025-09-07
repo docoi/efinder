@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm uninstall:*)",
+      "Bash(npm install:*)",
+      "Read(/C:\\Sites\\efinder\\pages/**)",
+      "Read(/C:\\Sites\\efinder\\pages/**)",
+      "Read(/C:\\Sites\\efinder\\pages/**)",
+      "Read(/C:\\Sites\\efinder\\components/**)",
+      "Read(/C:\\Sites\\efinder\\pages/**)",
+      "Read(/C:\\Sites\\efinder\\pages/**)",
+      "Read(/C:\\Sites\\efinder\\pages/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
