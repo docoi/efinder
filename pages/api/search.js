@@ -1,4 +1,3 @@
-// pages/api/search.js
 import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
 
 export default async function handler(req, res) {
@@ -16,28 +15,29 @@ export default async function handler(req, res) {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.user?.id) return res.status(401).json({ error: 'unauthorized' });
 
-    const vpsBase = process.env.VPS_API_BASE;
-    if (!vpsBase) return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE is not set' });
+    const vps = process.env.VPS_API_BASE;
+    if (!vps) return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE is not set' });
 
-    // Hit the VPS cache-first search
-    const vpsResp = await fetch(`${vpsBase}/search`, {
+    // Call your VPS (cache-first, no BD spend on this path)
+    const r = await fetch(`${vps}/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_id: session.user.id, q, limit }),
     });
 
-    if (!vpsResp.ok) {
-      const text = await vpsResp.text();
-      return res.status(502).json({ error: 'vps_failed', status: vpsResp.status, details: text.slice(0, 500) });
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(502).json({ error: 'vps_failed', status: r.status, details: text.slice(0, 500) });
     }
 
-    const leads = await vpsResp.json();
+    const leads = await r.json();
 
-    // Prepare credits + dedupe upsert into deliveries
+    // Upsert deliveries for billing + no-dup guarantee
     const rows = (Array.isArray(leads) ? leads : []).map((l) => {
       const primary = Array.isArray(l.emails_primary_json) ? l.emails_primary_json : [];
       const related = Array.isArray(l.emails_related_json) ? l.emails_related_json : [];
       const emails = Array.isArray(l.emails) ? l.emails : [...primary, ...related];
+
       return {
         user_id: session.user.id,
         ig_id: String(l.ig_id),
@@ -50,11 +50,7 @@ export default async function handler(req, res) {
       const { error: upsertErr } = await supabase
         .from('deliveries')
         .upsert(rows, { onConflict: 'user_id,ig_id', ignoreDuplicates: true });
-
-      if (upsertErr) {
-        // Log but don't fail the request
-        console.error('deliveries upsert error', upsertErr);
-      }
+      if (upsertErr) console.error('deliveries upsert error', upsertErr);
     }
 
     return res.status(200).json({ leads });
