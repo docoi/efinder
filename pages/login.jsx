@@ -1,100 +1,40 @@
-// pages/login.jsx
 import dynamic from 'next/dynamic';
 import Head from 'next/head';
-import { useEffect, useState } from 'react';
-import { getBrowserSupabase } from '../lib/supabaseBrowserClient';
+import { useEffect } from 'react';
+import { useRouter } from 'next/router';
+import { Auth } from '@supabase/auth-ui-react';
+import { ThemeSupa } from '@supabase/auth-ui-shared';
+import { useSession, useSupabaseClient } from '@supabase/auth-helpers-react';
 
 function LoginInner() {
-  const supabase = getBrowserSupabase();
-  const [email, setEmail] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState('');
-  const [err, setErr] = useState('');
+  const supabase = useSupabaseClient();
+  const session = useSession();
+  const router = useRouter();
 
+  // If we already have a session, go to the dashboard
   useEffect(() => {
-    if (!supabase) return;
-
-    // if already logged in, bounce to dashboard
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) window.location.href = '/dashboard';
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-      if (session) window.location.href = '/dashboard';
-    });
-    return () => sub?.subscription?.unsubscribe();
-  }, [supabase]);
-
-  async function handleEmailLogin(e) {
-    e.preventDefault();
-    if (!supabase) return;
-
-    setLoading(true);
-    setErr('');
-    setMsg('');
-
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        emailRedirectTo: `${window.location.origin}/dashboard`,
-      },
-    });
-
-    if (error) setErr(error.message);
-    else setMsg('Check your inbox for the login link.');
-    setLoading(false);
-  }
+    if (session) router.replace('/dashboard');
+  }, [session, router]);
 
   return (
     <>
-      <Head>
-        <title>Login | Insta Email Scout</title>
-        <link rel="icon" href="/favicon.ico" />
-      </Head>
-
+      <Head><title>Login | Insta Email Scout</title></Head>
       <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
         <div className="w-full max-w-md bg-white rounded-xl shadow p-6">
-          <h1 className="text-2xl font-bold mb-1 text-center">Sign in</h1>
-          <p className="text-center text-gray-500 mb-6">
-            We’ll email you a magic link to log in.
-          </p>
-
-          <form onSubmit={handleEmailLogin} className="space-y-4">
-            <label className="block text-sm font-medium text-gray-700">
-              Email address
-            </label>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="you@example.com"
-            />
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full rounded bg-blue-600 text-white py-2 font-medium hover:bg-blue-700 disabled:opacity-50"
-            >
-              {loading ? 'Sending…' : 'Send magic link'}
-            </button>
-          </form>
-
-          {msg && (
-            <div className="mt-4 rounded border border-green-300 bg-green-50 p-3 text-green-800">
-              {msg}
-            </div>
-          )}
-          {err && (
-            <div className="mt-4 rounded border border-red-300 bg-red-50 p-3 text-red-700">
-              {err}
-            </div>
-          )}
+          <h1 className="text-2xl font-bold mb-4 text-center">Sign in</h1>
+          <Auth
+            supabaseClient={supabase}
+            appearance={{ theme: ThemeSupa }}
+            providers={[]}
+            magicLink
+            // where Supabase should send the user back after clicking the email link
+            redirectTo={typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined}
+          />
         </div>
       </div>
     </>
   );
 }
 
+// render only on the client (avoids SSR issues with hooks)
 export default dynamic(() => Promise.resolve(LoginInner), { ssr: false });
