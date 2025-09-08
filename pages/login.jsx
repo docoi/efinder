@@ -1,34 +1,123 @@
+// pages/login.jsx
 import dynamic from 'next/dynamic';
-import { Auth } from '@supabase/auth-ui-react';
-import { ThemeSupa } from '@supabase/auth-ui-shared';
-import { useSupabaseClient, useSession } from '@supabase/auth-helpers-react';
 import Head from 'next/head';
+import { useEffect, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
+
+// Create one browser client (no SSR)
+const supabase =
+  typeof window !== 'undefined'
+    ? createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+        {
+          auth: {
+            persistSession: true,
+            storage: window.localStorage,
+          },
+        }
+      )
+    : null;
 
 function LoginInner() {
-  const supabase = useSupabaseClient();
-  const session = useSession();
+  const [email, setEmail] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+
+  // If already signed in, go straight to dashboard
+  useEffect(() => {
+    if (!supabase) return;
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session) window.location.href = '/dashboard';
+    });
+    // also check immediately on mount
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) window.location.href = '/dashboard';
+    });
+    return () => sub?.subscription?.unsubscribe();
+  }, []);
+
+  async function handleEmailLogin(e) {
+    e.preventDefault();
+    if (!supabase) return;
+    setLoading(true);
+    setErr('');
+    setMsg('');
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: `${window.location.origin}/dashboard`,
+      },
+    });
+    if (error) setErr(error.message);
+    else setMsg('Check your inbox for the login link.');
+    setLoading(false);
+  }
 
   return (
     <>
-      <Head><title>Login | Insta Email Scout</title></Head>
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
-      <div className="w-full max-w-md bg-white rounded-xl shadow p-6">
-        <h1 className="text-2xl font-bold mb-4 text-center">Sign in</h1>
-        <Auth
-          supabaseClient={supabase}
-          appearance={{ theme: ThemeSupa }}
-          providers={[]}
-          redirectTo="/dashboard"
-          onlyThirdPartyProviders={false}
-        />
-        {session ? (
-          <p className="mt-4 text-center text-sm">You are signed in.</p>
-        ) : null}
+      <Head>
+        <title>Login | Insta Email Scout</title>
+        <link rel="icon" href="/favicon.ico" />
+      </Head>
+
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
+        <div className="w-full max-w-md bg-white rounded-xl shadow p-6">
+          <h1 className="text-2xl font-bold mb-1 text-center">Sign in</h1>
+          <p className="text-center text-gray-500 mb-6">
+            We’ll email you a magic link to log in.
+          </p>
+
+          <form onSubmit={handleEmailLogin} className="space-y-4">
+            <label className="block text-sm font-medium text-gray-700">
+              Email address
+            </label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full rounded border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="you@example.com"
+            />
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full rounded bg-blue-600 text-white py-2 font-medium hover:bg-blue-700 disabled:opacity-50"
+            >
+              {loading ? 'Sending…' : 'Send magic link'}
+            </button>
+          </form>
+
+          {msg && (
+            <div className="mt-4 rounded border border-green-300 bg-green-50 p-3 text-green-800">
+              {msg}
+            </div>
+          )}
+          {err && (
+            <div className="mt-4 rounded border border-red-300 bg-red-50 p-3 text-red-700">
+              {err}
+            </div>
+          )}
+
+          <hr className="my-6" />
+
+          {/* Optional social login if you’ve enabled it in Supabase */}
+          {/* 
+          <button
+            onClick={() => supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/dashboard` } })}
+            className="w-full rounded border border-gray-300 py-2 hover:bg-gray-50"
+          >
+            Continue with Google
+          </button> 
+          */}
+        </div>
       </div>
-    </div>
     </>
   );
 }
 
-// 👉 disable SSR so this page never renders on the server
+// Ensure this page is *client only* (no SSR)
 export default dynamic(() => Promise.resolve(LoginInner), { ssr: false });
