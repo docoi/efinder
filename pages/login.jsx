@@ -11,14 +11,16 @@ function LoginInner() {
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
 
-  // If already signed in, go straight to dashboard
   useEffect(() => {
     if (!supabase) return;
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) window.location.href = '/dashboard';
-    });
+
+    // if already logged in, bounce to dashboard
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) window.location.href = '/dashboard';
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+      if (session) window.location.href = '/dashboard';
     });
     return () => sub?.subscription?.unsubscribe();
   }, [supabase]);
@@ -26,15 +28,18 @@ function LoginInner() {
   async function handleEmailLogin(e) {
     e.preventDefault();
     if (!supabase) return;
+
     setLoading(true);
     setErr('');
     setMsg('');
+
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
         emailRedirectTo: `${window.location.origin}/dashboard`,
       },
     });
+
     if (error) setErr(error.message);
     else setMsg('Check your inbox for the login link.');
     setLoading(false);
