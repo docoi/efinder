@@ -11,10 +11,13 @@ function LoginInner() {
   const session = useSession();
   const router = useRouter();
 
-  // If we already have a session, go to the dashboard
+  // If already signed-in, go straight to dashboard
   useEffect(() => {
     if (session) router.replace('/dashboard');
   }, [session, router]);
+
+  const redirectTo =
+    typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined;
 
   return (
     <>
@@ -27,8 +30,7 @@ function LoginInner() {
             appearance={{ theme: ThemeSupa }}
             providers={[]}
             magicLink
-            // where Supabase should send the user back after clicking the email link
-            redirectTo={typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined}
+            redirectTo={redirectTo}
           />
         </div>
       </div>
@@ -36,5 +38,5 @@ function LoginInner() {
   );
 }
 
-// render only on the client (avoids SSR issues with hooks)
+// render only on the client to avoid SSR hook issues
 export default dynamic(() => Promise.resolve(LoginInner), { ssr: false });

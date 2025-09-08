@@ -1,9 +1,11 @@
-import React from 'react';
-import { useSupabaseClient, useUser } from '@supabase/auth-helpers-nextjs';
+import Head from 'next/head';
+import { useRouter } from 'next/router';
+import { useSupabaseClient, useUser } from '@supabase/auth-helpers-react';
 import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
 import UserDashboard from '../components/UserDashboard';
 
 export default function DashboardPage() {
+  const router = useRouter();
   const supabase = useSupabaseClient();
   const user = useUser();
 
@@ -13,12 +15,14 @@ export default function DashboardPage() {
     } catch (e) {
       console.error('Sign out error', e);
     } finally {
-      window.location.href = '/login';
+      router.replace('/login'); // safe client-side redirect
     }
   };
 
   return (
-    <div>
+    <>
+      <Head><title>Dashboard | Insta Email Scout</title></Head>
+
       <div className="flex justify-end p-4">
         <button
           onClick={handleLogout}
@@ -31,17 +35,21 @@ export default function DashboardPage() {
 
       {/* If your dashboard needs the user object, it’s here */}
       <UserDashboard user={user ?? null} />
-    </div>
+    </>
   );
 }
 
 /** 🔒 Server-side auth guard: redirect to /login if no session */
 export async function getServerSideProps(ctx) {
   const supabase = createServerSupabaseClient(ctx);
-  const { data: { session } } = await supabase.auth.getSession();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
 
   if (!session) {
     return { redirect: { destination: '/login', permanent: false } };
   }
+
+  // Hydrate the client with the initial session so hooks work immediately
   return { props: { initialSession: session, user: session.user } };
 }
