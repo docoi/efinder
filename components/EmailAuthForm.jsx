@@ -1,11 +1,9 @@
-// pages/login.jsx
-import dynamic from 'next/dynamic';
-import Head from 'next/head';
-import { useEffect, useMemo, useState } from 'react';
+// components/EmailAuthForm.jsx
+import { useState, useMemo } from 'react';
 import { useRouter } from 'next/router';
-import { useSupabaseClient, useSession } from '@supabase/auth-helpers-react';
+import { useSupabaseClient } from '@supabase/auth-helpers-react';
 
-/** Make Supabase errors human-friendly */
+/** Small helper to make Supabase errors human-friendly */
 function niceError(msg = '') {
   const m = msg.toLowerCase();
   if (m.includes('invalid login credentials')) return 'Email or password is incorrect.';
@@ -16,8 +14,7 @@ function niceError(msg = '') {
   return msg || 'Something went wrong. Please try again.';
 }
 
-/** Inline custom auth form (sign in / sign up / magic link / forgot) */
-function EmailAuthForm() {
+export default function EmailAuthForm() {
   const supabase = useSupabaseClient();
   const router = useRouter();
 
@@ -66,7 +63,8 @@ function EmailAuthForm() {
       });
       if (error) return setNote({ type: 'error', text: niceError(error.message) });
       if (data?.session) {
-        router.push('/dashboard'); // email confirmation not required
+        // (rare) email confirmation not required
+        router.push('/dashboard');
       } else {
         setNote({
           type: 'success',
@@ -87,7 +85,9 @@ function EmailAuthForm() {
 
   const onForgot = () =>
     handle(async () => {
-      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo,
+      });
       if (error) return setNote({ type: 'error', text: niceError(error.message) });
       setNote({
         type: 'success',
@@ -209,23 +209,3 @@ function EmailAuthForm() {
     </div>
   );
 }
-
-function LoginPage() {
-  const session = useSession();
-  const router = useRouter();
-
-  // If returning from a magic/confirm link with a session, go straight to dashboard.
-  useEffect(() => {
-    if (session) router.replace('/dashboard');
-  }, [session, router]);
-
-  return (
-    <>
-      <Head><title>Login | Insta Email Scout</title></Head>
-      <EmailAuthForm />
-    </>
-  );
-}
-
-// Disable SSR to avoid hydration glitches when auth state changes during first paint.
-export default dynamic(() => Promise.resolve(LoginPage), { ssr: false });
