@@ -2,24 +2,10 @@
 import dynamic from 'next/dynamic';
 import Head from 'next/head';
 import { useEffect, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
-
-// Create one browser client (no SSR)
-const supabase =
-  typeof window !== 'undefined'
-    ? createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-        {
-          auth: {
-            persistSession: true,
-            storage: window.localStorage,
-          },
-        }
-      )
-    : null;
+import { getBrowserSupabase } from '../lib/supabaseBrowserClient';
 
 function LoginInner() {
+  const supabase = getBrowserSupabase();
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
@@ -31,12 +17,11 @@ function LoginInner() {
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) window.location.href = '/dashboard';
     });
-    // also check immediately on mount
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) window.location.href = '/dashboard';
     });
     return () => sub?.subscription?.unsubscribe();
-  }, []);
+  }, [supabase]);
 
   async function handleEmailLogin(e) {
     e.preventDefault();
@@ -101,23 +86,10 @@ function LoginInner() {
               {err}
             </div>
           )}
-
-          <hr className="my-6" />
-
-          {/* Optional social login if you’ve enabled it in Supabase */}
-          {/* 
-          <button
-            onClick={() => supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/dashboard` } })}
-            className="w-full rounded border border-gray-300 py-2 hover:bg-gray-50"
-          >
-            Continue with Google
-          </button> 
-          */}
         </div>
       </div>
     </>
   );
 }
 
-// Ensure this page is *client only* (no SSR)
 export default dynamic(() => Promise.resolve(LoginInner), { ssr: false });
