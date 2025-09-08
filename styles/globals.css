@@ -1,3 +1,7 @@
+/* styles/globals.css */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* (optional) your custom globals here */
+html, body { height: 100%; }
