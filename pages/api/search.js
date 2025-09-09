@@ -1,4 +1,53 @@
+// pages/api/search.js
 import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
+import { createClient } from '@supabase/supabase-js';
+
+const VPS_BASE = process.env.VPS_API_BASE;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+
+// normalize any VPS/cache row into a common shape
+function normalizeLead(row = {}) {
+  const ig_id = String(row.ig_id ?? row.id ?? '').trim();
+  const username = String(row.username ?? row.handle ?? '').trim();
+
+  // emails could be in different fields; unify to a flat array of strings
+  let emails = [];
+  const cand = [
+    row.emails,
+    row.emails_json,
+    row.emails_primary_json,
+    row.emails_related_json,
+    row.emails_primary,
+    row.emails_related,
+  ];
+  for (const c of cand) {
+    if (Array.isArray(c)) emails.push(...c);
+  }
+  // de-dup + trim + basic lowercase
+  emails = Array.from(new Set((emails || []).map((e) => String(e).trim().toLowerCase()))).filter(Boolean);
+
+  return {
+    ig_id,
+    username,
+    followers: Number(row.followers ?? row.follower_count ?? 0) || 0,
+    category: row.category ?? row.category_final ?? null,
+    emails,
+  };
+}
+
+// unique by ig_id, keep first occurrence
+function uniqByIgId(list) {
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const id = String(item.ig_id || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(item);
+  }
+  return out;
+}
 
 export default async function handler(req, res) {
   try {
@@ -7,133 +56,128 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: 'method_not_allowed' });
     }
 
+    if (!VPS_BASE || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+      return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE or SUPABASE_URL or SUPABASE_SERVICE_ROLE not set' });
+    }
+
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    const rawQ = (body.q || '').toString().trim();
-    const q = rawQ.slice(0, 120); // basic guard
-    const limit = Math.max(1, Math.min(100, Number(body.limit || 10)));
+    const q = String(body.q ?? '').trim();
+    const limit = Math.max(1, Math.min(100, Number(body.limit ?? 3)));
 
-    // Require a signed-in user
-    const supabase = createServerSupabaseClient({ req, res });
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.user?.id) return res.status(401).json({ error: 'unauthorized' });
-    const userId = session.user.id;
+    // auth (SSR cookie session)
+    const supaSSR = createServerSupabaseClient({ req, res });
+    const { data: { session } } = await supaSSR.auth.getSession();
+    const userId = session?.user?.id;
+    if (!userId) return res.status(401).json({ error: 'unauthorized' });
 
-    const vps = process.env.VPS_API_BASE;
-    if (!vps) return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE is not set' });
+    // server (service role) client for DB actions
+    const supaAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
 
-    // 1) Find what this user already received (exclude list)
-    const { data: deliveredRows, error: deliveredErr } = await supabase
+    // 1) CACHE: read from public.leads
+    // basic keyword match (category, username, biography, tags) – adjust as you like
+    // prefer rows with emails, order by followers desc
+    const { data: cachedRows, error: cacheErr } = await supaAdmin
+      .from('leads')
+      .select('ig_id, username, followers, category, biography, emails, emails_primary_json, emails_related_json')
+      .or([
+        q ? `category.ilike.%${q}%` : '',
+        q ? `username.ilike.%${q}%` : '',
+        q ? `biography.ilike.%${q}%` : '',
+      ].filter(Boolean).join(',') || 'ig_id.not.is.null') // fallback no-op to avoid empty OR
+      .limit(limit * 2) // grab extra; we’ll filter to emails later
+      .order('followers', { ascending: false });
+
+    if (cacheErr) console.error('cache select error', cacheErr);
+
+    const cacheNormalized = uniqByIgId(
+      (cachedRows || []).map(normalizeLead)
+        .filter(r => r.emails.length > 0)
+    );
+
+    // 2) Deliveries for this user → build exclude to guarantee no dupes
+    const { data: deliveredRows, error: delivErr } = await supaAdmin
       .from('deliveries')
       .select('ig_id')
       .eq('user_id', userId)
-      .limit(5000);
-    if (deliveredErr) console.warn('deliveries select error', deliveredErr);
-    const alreadyDelivered = (deliveredRows || []).map(r => String(r.ig_id));
+      .limit(2000);
+    if (delivErr) console.error('deliveries select error', delivErr);
 
-    // 2) CACHE-FIRST: query Supabase leads (username/biography/category)
-    //    Exclude already delivered, limit <= requested.
-    let cached = [];
-    if (q) {
-      // Build a simple OR filter for ilike matches
-      const ilike = `%${q}%`;
-      let cacheQuery = supabase
-        .from('leads')
-        .select('ig_id, username, biography, followers, category, emails')
-        .or(`username.ilike.${ilike},biography.ilike.${ilike},category.ilike.${ilike}`)
-        .order('followers', { ascending: false })
-        .limit(limit);
+    const deliveredIds = new Set((deliveredRows || []).map(r => String(r.ig_id)));
+    const cacheIds = new Set(cacheNormalized.map(r => String(r.ig_id)));
 
-      if (alreadyDelivered.length) {
-        // exclude delivered
-        cacheQuery = cacheQuery.not('ig_id', 'in', `(${alreadyDelivered.map(v => `"${v}"`).join(',')})`);
-      }
+    // start building the response list from cache (respect limit later after top-up merge)
+    let responseList = [...cacheNormalized];
 
-      const { data: cacheData, error: cacheErr } = await cacheQuery;
-      if (cacheErr) console.warn('cache query error', cacheErr);
-      cached = (cacheData || []);
-    }
+    // 3) VPS top-up if needed
+    const remainingNeeded = Math.max(0, limit - responseList.length);
 
-    let results = [...cached];
+    let vpsCountUsed = 0;
+    if (remainingNeeded > 0) {
+      // exclude = already delivered + already picked from cache
+      const exclude = Array.from(new Set([...deliveredIds, ...cacheIds]));
 
-    // 3) If still short, TOP UP from VPS (ask for only what we still need).
-    const remaining = Math.max(0, limit - results.length);
-    let runId = null;
+      // over-fetch a bit to survive de-dup and email filtering
+      const overfetch = Math.min(remainingNeeded * 2, 50);
 
-    if (remaining > 0) {
-      // Build an exclude list for the VPS so it doesn't send dupes:
-      const excludeIds = [
-        ...alreadyDelivered,
-        ...results.map(r => String(r.ig_id)),
-      ].slice(0, 500); // keep request small
-
-      const vpsResp = await fetch(`${vps}/search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, q, limit: remaining, exclude: excludeIds }),
-      });
-
-      if (!vpsResp.ok) {
-        const text = await vpsResp.text();
-        console.warn('VPS error', vpsResp.status, text.slice(0, 300));
-      } else {
-        const payload = await vpsResp.json();
-        const vpsResults = Array.isArray(payload) ? payload : (Array.isArray(payload?.results) ? payload.results : []);
-        runId = Array.isArray(payload) ? null : (payload?.run_id ?? null);
-
-        // Normalize shape and append (avoid dupes by ig_id)
-        const seen = new Set(results.map(r => String(r.ig_id)));
-        for (const l of vpsResults) {
-          const ig_id = String(l.ig_id ?? l.username ?? '');
-          if (!ig_id || seen.has(ig_id)) continue;
-          const primary = Array.isArray(l.emails_primary_json) ? l.emails_primary_json : [];
-          const related = Array.isArray(l.emails_related_json) ? l.emails_related_json : [];
-          const emails  = Array.isArray(l.emails) ? l.emails : [...primary, ...related];
-          results.push({
-            ig_id,
-            username: l.username ?? ig_id,
-            biography: l.biography ?? null,
-            followers: l.followers ?? null,
-            category: l.category ?? null,
-            emails: emails ?? [],
-          });
-          seen.add(ig_id);
-          if (results.length >= limit) break;
-        }
-      }
-    }
-
-    // 4) Insert deliveries (ignore duplicates) and deduct credits based on emails
-    const toInsert = results.map(r => ({
-      user_id: userId,
-      ig_id: String(r.ig_id),
-      emails: Array.isArray(r.emails) ? r.emails : [],
-      run_id: runId,
-    }));
-
-    let emailsDelivered = 0;
-    if (toInsert.length) {
-      emailsDelivered = toInsert.reduce((sum, r) => sum + (Array.isArray(r.emails) ? r.emails.length : 0), 0);
-
-      const { error: insErr } = await supabase
-        .from('deliveries')
-        .insert(toInsert, { returning: 'minimal' });
-      // unique (user_id, ig_id) may throw 23505 if VPS sent dupes; safe to ignore
-      if (insErr && insErr.code !== '23505') {
-        console.warn('deliveries insert error', insErr);
-      }
-
-      if (emailsDelivered > 0) {
-        const { error: rpcErr } = await supabase.rpc('deduct_credits', {
-          p_user: userId,
-          p_amount: emailsDelivered,
+      let vpsItems = [];
+      try {
+        const r = await fetch(`${VPS_BASE}/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ q, limit: overfetch, user_id: userId, exclude }),
         });
-        if (rpcErr) console.warn('deduct_credits error', rpcErr);
+        if (!r.ok) {
+          const text = await r.text();
+          console.error('VPS /search failed', r.status, text.slice(0, 500));
+        } else {
+          const payload = await r.json(); // expect {results:[...]} or [...]
+          const list = Array.isArray(payload) ? payload : (payload.results || []);
+          vpsItems = list.map(normalizeLead).filter(r => r.emails.length > 0);
+        }
+      } catch (e) {
+        console.error('VPS fetch error', e);
       }
+
+      // Merge cache + vps, dedupe by ig_id
+      const before = responseList.length;
+      responseList = uniqByIgId([...responseList, ...vpsItems]);
+      vpsCountUsed = Math.max(0, responseList.length - before);
     }
 
-    return res.status(200).json({ results, run_id: runId, emailsDelivered, source: { cache: cached.length, vps: results.length - cached.length } });
+    // 4) Trim to requested limit
+    responseList = responseList.slice(0, limit);
+
+    // 5) Record deliveries + debit credits (atomic RPC)
+    // prepare items for RPC: ig_id + emails array
+    const rpcItems = responseList.map(r => ({ ig_id: String(r.ig_id), emails: r.emails }));
+    let emailsDelivered = 0;
+
+    try {
+      const { data: deliveredDetail, error: rpcErr } = await supaAdmin
+        .rpc('deliver_and_debit', { _user: userId, _items: rpcItems });
+
+      if (rpcErr) {
+        console.error('deliver_and_debit error', rpcErr);
+      } else if (Array.isArray(deliveredDetail)) {
+        // deliveredDetail rows are (ig_id, emails) from the SQL function
+        emailsDelivered = deliveredDetail.reduce((sum, r) => sum + (Number(r.emails) || 0), 0);
+      }
+    } catch (e) {
+      console.error('deliver_and_debit exception', e);
+    }
+
+    const source = {
+      cache: Math.min(cacheNormalized.length, responseList.length),
+      vps: vpsCountUsed,
+    };
+
+    return res.status(200).json({
+      results: responseList,
+      emailsDelivered,
+      source,
+    });
   } catch (e) {
-    console.error(e);
+    console.error('search handler error', e);
     return res.status(500).json({ error: 'internal_error', message: String(e).slice(0, 500) });
   }
 }
