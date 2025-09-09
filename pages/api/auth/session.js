@@ -1,16 +1,9 @@
 // pages/api/auth/session.js
-export default async function handler(req, res) {
-    // Some versions of the helper expect GET, but the client may POST.
-    if (req.method === 'POST') {
-      try {
-        // Coerce POST -> GET to satisfy the helper
-        req.method = 'GET';
-      } catch (_) {
-        // ignore if read-only; the helper will still handle GET/POST in newer versions
-      }
-    }
-  
-    const { handleSession } = await import('@supabase/auth-helpers-nextjs');
-    return handleSession(req, res);
+export default function handler(req, res) {
+  // no-op: acknowledge session pings from the client helper
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    res.setHeader('Allow', ['GET', 'POST']);
+    return res.status(405).end();
   }
-  
+  return res.status(200).json({ ok: true });
+}
