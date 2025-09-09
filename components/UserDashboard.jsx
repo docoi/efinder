@@ -1,30 +1,39 @@
 import React, { useState, useEffect } from 'react';
 
+function dedupeById(list) {
+  const seen = new Set();
+  const out = [];
+  for (const r of list) {
+    const key = String(r.ig_id ?? r.username ?? '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
 export default function UserDashboard({ user }) {
   const [credits, setCredits] = useState(null);
-  const [plan, setPlan] = useState('Professional ($29/mo)'); // placeholder, later tie to Stripe
+  const [plan] = useState('Professional ($29/mo)'); // placeholder, wire to Stripe later
   const [q, setQ] = useState('');
   const [limit, setLimit] = useState(10);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState([]);
   const [error, setError] = useState('');
 
-  // Fetch credits on load
   async function fetchCredits() {
     try {
       const r = await fetch('/api/me/credits');
       const j = await r.json();
       if (r.ok) setCredits(j?.credits_available ?? 0);
-    } catch (e) {
-      console.error('credits fetch failed', e);
+      else setCredits(0);
+    } catch {
+      setCredits(0);
     }
   }
 
-  useEffect(() => {
-    fetchCredits();
-  }, []);
+  useEffect(() => { fetchCredits(); }, []);
 
-  // Run search
   async function onSearch(e) {
     e.preventDefault();
     if (!q) return;
@@ -34,22 +43,24 @@ export default function UserDashboard({ user }) {
       const r = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q, limit: Number(limit) }),
+        body: JSON.stringify({ q, limit: Number(limit) || 10 }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || 'Search failed');
-      setResults(j?.results ?? []);
-      fetchCredits();
+
+      const newResults = Array.isArray(j.results) ? j.results : [];
+      // Append and de-dupe so 1 then 2 => 3 total
+      setResults(prev => dedupeById([...(prev || []), ...newResults]));
+      await fetchCredits(); // refresh balance after deduction
     } catch (err) {
-      console.error(err);
       setError(err.message);
     } finally {
       setLoading(false);
     }
   }
 
-  // Download CSV of current results
   async function onExport() {
+    if (!results.length) return;
     const r = await fetch('/api/export-csv', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -73,14 +84,16 @@ export default function UserDashboard({ user }) {
             <h1 className="text-3xl font-bold text-gray-800">Welcome back 👋</h1>
             <p className="text-gray-500">Here’s your dashboard to manage searches, credits, and billing.</p>
           </div>
-          {/* Removed unused logout button */}
+          {/* removed unused Logout button */}
         </header>
 
-        {/* Stats Cards */}
+        {/* Stat Cards */}
         <div className="grid md:grid-cols-3 gap-6 mb-10">
           <div className="bg-white shadow rounded-lg p-5">
             <h2 className="text-sm font-medium text-gray-500 mb-1">Credits Remaining</h2>
-            <p className="text-3xl font-bold text-blue-600">{credits ?? '—'}</p>
+            <p className="text-3xl font-bold text-blue-600">
+              {credits === null ? '—' : credits}
+            </p>
             <p className="text-xs text-gray-400">Resets monthly</p>
           </div>
           <div className="bg-white shadow rounded-lg p-5">
@@ -137,7 +150,7 @@ export default function UserDashboard({ user }) {
           <p className="text-xs text-gray-400 mt-2">Your results will appear below and be available for CSV download.</p>
         </section>
 
-        {/* Results Table */}
+        {/* Results */}
         <section className="bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-bold text-gray-800 mb-4">Your Recent Results</h2>
           {!results.length ? (
@@ -154,7 +167,7 @@ export default function UserDashboard({ user }) {
               </thead>
               <tbody>
                 {results.map((r) => (
-                  <tr key={r.ig_id} className="border-t">
+                  <tr key={String(r.ig_id ?? r.username)} className="border-t">
                     <td className="py-2">@{r.username || r.ig_id}</td>
                     <td>{Array.isArray(r.emails) ? r.emails.join(', ') : '—'}</td>
                     <td>{r.followers ?? '—'}</td>
