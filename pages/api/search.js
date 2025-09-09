@@ -1,53 +1,5 @@
 // pages/api/search.js
 import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
-import { createClient } from '@supabase/supabase-js';
-
-const VPS_BASE = process.env.VPS_API_BASE;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-
-// normalize any VPS/cache row into a common shape
-function normalizeLead(row = {}) {
-  const ig_id = String(row.ig_id ?? row.id ?? '').trim();
-  const username = String(row.username ?? row.handle ?? '').trim();
-
-  // emails could be in different fields; unify to a flat array of strings
-  let emails = [];
-  const cand = [
-    row.emails,
-    row.emails_json,
-    row.emails_primary_json,
-    row.emails_related_json,
-    row.emails_primary,
-    row.emails_related,
-  ];
-  for (const c of cand) {
-    if (Array.isArray(c)) emails.push(...c);
-  }
-  // de-dup + trim + basic lowercase
-  emails = Array.from(new Set((emails || []).map((e) => String(e).trim().toLowerCase()))).filter(Boolean);
-
-  return {
-    ig_id,
-    username,
-    followers: Number(row.followers ?? row.follower_count ?? 0) || 0,
-    category: row.category ?? row.category_final ?? null,
-    emails,
-  };
-}
-
-// unique by ig_id, keep first occurrence
-function uniqByIgId(list) {
-  const seen = new Set();
-  const out = [];
-  for (const item of list) {
-    const id = String(item.ig_id || '').trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push(item);
-  }
-  return out;
-}
 
 export default async function handler(req, res) {
   try {
@@ -56,128 +8,111 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: 'method_not_allowed' });
     }
 
-    if (!VPS_BASE || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-      return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE or SUPABASE_URL or SUPABASE_SERVICE_ROLE not set' });
-    }
-
+    // ---- parse & validate input
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    const q = String(body.q ?? '').trim();
-    const limit = Math.max(1, Math.min(100, Number(body.limit ?? 3)));
+    let { q = '', limit = 3 } = body;
+    q = String(q || '').trim();
+    limit = Math.max(1, Math.min(50, parseInt(limit, 10) || 1));
+    if (!q) return res.status(400).json({ error: 'missing_q' });
 
-    // auth (SSR cookie session)
-    const supaSSR = createServerSupabaseClient({ req, res });
-    const { data: { session } } = await supaSSR.auth.getSession();
-    const userId = session?.user?.id;
+    // ---- supabase (SSR) + session
+    const supabase = createServerSupabaseClient({ req, res });
+    const { data: { session } } = await supabase.auth.getSession();
+    const userId = session?.user?.id || null;
     if (!userId) return res.status(401).json({ error: 'unauthorized' });
 
-    // server (service role) client for DB actions
-    const supaAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
+    // ---- env check
+    const vps = process.env.VPS_API_BASE;
+    if (!vps) return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE is not set' });
 
-    // 1) CACHE: read from public.leads
-    // basic keyword match (category, username, biography, tags) – adjust as you like
-    // prefer rows with emails, order by followers desc
-    const { data: cachedRows, error: cacheErr } = await supaAdmin
-      .from('leads')
-      .select('ig_id, username, followers, category, biography, emails, emails_primary_json, emails_related_json')
-      .or([
-        q ? `category.ilike.%${q}%` : '',
-        q ? `username.ilike.%${q}%` : '',
-        q ? `biography.ilike.%${q}%` : '',
-      ].filter(Boolean).join(',') || 'ig_id.not.is.null') // fallback no-op to avoid empty OR
-      .limit(limit * 2) // grab extra; we’ll filter to emails later
-      .order('followers', { ascending: false });
+    // ---- ask VPS for cached results first
+    const r = await fetch(`${vps}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        q,
+        limit,
+        user_id: userId, // VPS may use this only for logging/auditing; no secrets exposed
+      }),
+    });
 
-    if (cacheErr) console.error('cache select error', cacheErr);
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(502).json({ error: 'vps_failed', status: r.status, details: text.slice(0, 500) });
+    }
 
-    const cacheNormalized = uniqByIgId(
-      (cachedRows || []).map(normalizeLead)
-        .filter(r => r.emails.length > 0)
-    );
+    const json = await r.json();
+    // Support both shapes:
+    // 1) { results:[...], source:{cache:<n>, vps:<m>}, emailsDelivered:<n> }
+    // 2) legacy: [...]  (treat as results array)
+    const results = Array.isArray(json) ? json : (Array.isArray(json.results) ? json.results : []);
+    const source = Array.isArray(json) ? {} : (json.source || {});
+    let emailsDelivered = Array.isArray(json) ? undefined : (json.emailsDelivered ?? undefined);
 
-    // 2) Deliveries for this user → build exclude to guarantee no dupes
-    const { data: deliveredRows, error: delivErr } = await supaAdmin
-      .from('deliveries')
-      .select('ig_id')
-      .eq('user_id', userId)
-      .limit(2000);
-    if (delivErr) console.error('deliveries select error', delivErr);
+    // ---- normalize rows for deliveries upsert + count emails if not provided
+    const deliveryRows = [];
+    let computedEmails = 0;
 
-    const deliveredIds = new Set((deliveredRows || []).map(r => String(r.ig_id)));
-    const cacheIds = new Set(cacheNormalized.map(r => String(r.ig_id)));
+    for (const l of results) {
+      const primary = Array.isArray(l.emails_primary_json) ? l.emails_primary_json : [];
+      const related = Array.isArray(l.emails_related_json) ? l.emails_related_json : [];
+      const emails =
+        Array.isArray(l.emails) ? l.emails :
+        Array.isArray(l.emails_json) ? l.emails_json : // in case your VPS used a different field
+        [...primary, ...related];
 
-    // start building the response list from cache (respect limit later after top-up merge)
-    let responseList = [...cacheNormalized];
+      const charge = Array.isArray(emails) ? emails.length : 0;
+      computedEmails += charge;
 
-    // 3) VPS top-up if needed
-    const remainingNeeded = Math.max(0, limit - responseList.length);
+      deliveryRows.push({
+        user_id: userId,
+        ig_id: String(l.ig_id),
+        credits_charged: charge,
+        is_trial: false,
+      });
+    }
 
-    let vpsCountUsed = 0;
-    if (remainingNeeded > 0) {
-      // exclude = already delivered + already picked from cache
-      const exclude = Array.from(new Set([...deliveredIds, ...cacheIds]));
+    if (typeof emailsDelivered !== 'number') emailsDelivered = computedEmails;
 
-      // over-fetch a bit to survive de-dup and email filtering
-      const overfetch = Math.min(remainingNeeded * 2, 50);
+    // ---- upsert deliveries (no dupes per (user_id, ig_id))
+    if (deliveryRows.length) {
+      const { error: upsertErr } = await supabase
+        .from('deliveries')
+        .upsert(deliveryRows, { onConflict: 'user_id,ig_id', ignoreDuplicates: true });
+      if (upsertErr) console.error('deliveries upsert error', upsertErr);
+    }
 
-      let vpsItems = [];
+    // ---- deduct credits if any were actually delivered
+    if (emailsDelivered > 0) {
+      const { error: rpcErr } = await supabase.rpc('deduct_credits', { uid: userId, n: emailsDelivered });
+      if (rpcErr) console.error('deduct_credits error', rpcErr);
+    }
+
+    // ---- fire-and-forget "top-up" if cache didn’t meet the request
+    const shortfall = Math.max(0, Number(limit) - results.length);
+    if (shortfall > 0) {
       try {
-        const r = await fetch(`${VPS_BASE}/search`, {
+        const exclude = results.map((r) => String(r.ig_id));
+        // This does not block the user; your VPS should enqueue scraping and upsert into public.leads
+        fetch(`${vps}/discover`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ q, limit: overfetch, user_id: userId, exclude }),
-        });
-        if (!r.ok) {
-          const text = await r.text();
-          console.error('VPS /search failed', r.status, text.slice(0, 500));
-        } else {
-          const payload = await r.json(); // expect {results:[...]} or [...]
-          const list = Array.isArray(payload) ? payload : (payload.results || []);
-          vpsItems = list.map(normalizeLead).filter(r => r.emails.length > 0);
-        }
+          body: JSON.stringify({ q, limit: shortfall, exclude }),
+        }).catch(() => {});
       } catch (e) {
-        console.error('VPS fetch error', e);
+        // never block the main path
+        console.warn('top-up discover fire-and-forget failed', e);
       }
-
-      // Merge cache + vps, dedupe by ig_id
-      const before = responseList.length;
-      responseList = uniqByIgId([...responseList, ...vpsItems]);
-      vpsCountUsed = Math.max(0, responseList.length - before);
     }
 
-    // 4) Trim to requested limit
-    responseList = responseList.slice(0, limit);
-
-    // 5) Record deliveries + debit credits (atomic RPC)
-    // prepare items for RPC: ig_id + emails array
-    const rpcItems = responseList.map(r => ({ ig_id: String(r.ig_id), emails: r.emails }));
-    let emailsDelivered = 0;
-
-    try {
-      const { data: deliveredDetail, error: rpcErr } = await supaAdmin
-        .rpc('deliver_and_debit', { _user: userId, _items: rpcItems });
-
-      if (rpcErr) {
-        console.error('deliver_and_debit error', rpcErr);
-      } else if (Array.isArray(deliveredDetail)) {
-        // deliveredDetail rows are (ig_id, emails) from the SQL function
-        emailsDelivered = deliveredDetail.reduce((sum, r) => sum + (Number(r.emails) || 0), 0);
-      }
-    } catch (e) {
-      console.error('deliver_and_debit exception', e);
-    }
-
-    const source = {
-      cache: Math.min(cacheNormalized.length, responseList.length),
-      vps: vpsCountUsed,
-    };
-
+    // ---- respond to client
     return res.status(200).json({
-      results: responseList,
+      results,
       emailsDelivered,
       source,
     });
   } catch (e) {
-    console.error('search handler error', e);
+    console.error(e);
     return res.status(500).json({ error: 'internal_error', message: String(e).slice(0, 500) });
   }
 }
