@@ -1,34 +1,31 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
-// small helper to avoid duplicates in the table
-function dedupeById(list) {
+function dedupeByUsername(list) {
   const seen = new Set();
   const out = [];
   for (const r of list) {
-    const key = String(r.ig_id ?? r.username ?? '');
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
+    const uname = String(r?.username || '').toLowerCase();
+    if (!uname || seen.has(uname)) continue;
+    seen.add(uname);
     out.push(r);
   }
   return out;
 }
 
-export default function UserDashboard() {
+export default function UserDashboard({ user }) {
   const [credits, setCredits] = useState(null);
-  const [plan] = useState('Professional ($29/mo)'); // placeholder
+  const [plan] = useState('Professional ($29/mo)');
   const [q, setQ] = useState('');
   const [limit, setLimit] = useState(10);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState([]);
   const [error, setError] = useState('');
 
-  // pull current credits
   async function fetchCredits() {
     try {
       const r = await fetch('/api/me/credits');
       const j = await r.json();
-      if (r.ok) setCredits(j?.credits_available ?? 0);
-      else setCredits(0);
+      setCredits(r.ok ? (j?.credits_available ?? 0) : 0);
     } catch {
       setCredits(0);
     }
@@ -36,18 +33,15 @@ export default function UserDashboard() {
 
   useEffect(() => { fetchCredits(); }, []);
 
-  // main search
   async function onSearch(e) {
-    e?.preventDefault?.();
+    e.preventDefault();
     if (!q) return;
     setLoading(true);
     setError('');
 
     try {
-      // send ig_ids we already have so VPS skips them and does not re-charge
-      const exclude = (results || [])
-        .map(r => String(r?.ig_id ?? ''))
-        .filter(Boolean);
+      const excludeIds = results.map(r => String(r?.ig_id || '')).filter(Boolean);
+      const excludeUsernames = results.map(r => String(r?.username || '').toLowerCase()).filter(Boolean);
 
       const r = await fetch('/api/search', {
         method: 'POST',
@@ -55,26 +49,24 @@ export default function UserDashboard() {
         body: JSON.stringify({
           q,
           limit: Number(limit) || 10,
-          exclude,
+          exclude: excludeIds,
+          exclude_usernames: excludeUsernames,
         }),
       });
 
       const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || 'Search failed');
+      if (!r.ok) throw new Error(j?.error || 'search_failed');
 
-      const newRows = Array.isArray(j.results) ? j.results : [];
-      setResults(prev => dedupeById([...(prev || []), ...newRows]));
-
-      // credits are deducted on the VPS for *new* emails only; refresh the display
+      const newResults = Array.isArray(j.results) ? j.results : [];
+      setResults(prev => dedupeByUsername([...(prev || []), ...newResults]));
       await fetchCredits();
     } catch (err) {
-      setError(err.message || 'Search failed');
+      setError(err.message || 'server_error');
     } finally {
       setLoading(false);
     }
   }
 
-  // CSV export of everything currently in the table
   async function onExport() {
     if (!results.length) return;
     const r = await fetch('/api/export-csv', {
@@ -92,64 +84,58 @@ export default function UserDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-200 p-6">
+    <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto">
-        {/* Header */}
         <header className="flex justify-between items-center mb-8">
           <div>
             <h1 className="text-3xl font-bold text-gray-800">Welcome back 👋</h1>
-            <p className="text-gray-500">Here’s your dashboard to manage searches, credits, and billing.</p>
+            <p className="text-gray-500">Manage searches, credits, and billing.</p>
           </div>
+          <form method="post" action="/api/auth/logout">
+            <button className="px-3 py-2 text-sm bg-gray-200 rounded">Logout</button>
+          </form>
         </header>
 
-        {/* Stat Cards */}
         <div className="grid md:grid-cols-3 gap-6 mb-10">
           <div className="bg-white shadow rounded-lg p-5">
-            <h2 className="text-sm font-medium text-gray-500 mb-1">Credits Remaining</h2>
-            <p className="text-3xl font-bold text-blue-600">
-              {credits === null ? '—' : credits}
-            </p>
+            <h2 className="text-sm text-gray-500 mb-1">Credits Remaining</h2>
+            <p className="text-3xl font-bold text-blue-600">{credits ?? '—'}</p>
             <p className="text-xs text-gray-400">Resets monthly</p>
           </div>
-
           <div className="bg-white shadow rounded-lg p-5">
-            <h2 className="text-sm font-medium text-gray-500 mb-1">Current Plan</h2>
+            <h2 className="text-sm text-gray-500 mb-1">Current Plan</h2>
             <p className="text-xl font-semibold text-gray-800">{plan}</p>
             <button className="mt-2 text-sm text-blue-600 hover:underline">Upgrade or Change</button>
           </div>
-
           <div className="bg-white shadow rounded-lg p-5">
-            <h2 className="text-sm font-medium text-gray-500 mb-1">Download Invoices</h2>
-            <button className="mt-2 px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition">
-              View Billing History
-            </button>
+            <h2 className="text-sm text-gray-500 mb-1">Download Invoices</h2>
+            <button className="mt-2 px-4 py-2 bg-blue-600 text-white text-sm rounded">View Billing History</button>
             <p className="text-xs text-gray-400 mt-1">Powered by Stripe</p>
           </div>
         </div>
 
-        {/* Search Tool */}
         <section className="bg-white rounded-lg shadow p-6 mb-10">
           <h2 className="text-xl font-bold text-gray-800 mb-4">Search Instagram Emails</h2>
           <form onSubmit={onSearch} className="flex flex-col md:flex-row gap-4">
             <input
               type="text"
               placeholder="Enter @username or keyword e.g. florist"
-              className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-4 py-2 border border-gray-300 rounded"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
             <input
               type="number"
               min="1"
-              max="100"
+              max="50"
               value={limit}
               onChange={(e) => setLimit(e.target.value)}
-              className="w-28 px-4 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-28 px-4 py-2 border border-gray-300 rounded"
               title="Quantity"
             />
             <button
               type="submit"
-              className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 transition disabled:opacity-50"
+              className="bg-blue-600 text-white px-6 py-2 rounded disabled:opacity-50"
               disabled={loading}
             >
               {loading ? 'Searching…' : 'Search'}
@@ -157,19 +143,16 @@ export default function UserDashboard() {
             <button
               type="button"
               onClick={onExport}
-              className="bg-gray-200 text-gray-700 px-4 py-2 rounded hover:bg-gray-300 transition disabled:opacity-50"
+              className="bg-gray-200 text-gray-700 px-4 py-2 rounded disabled:opacity-50"
               disabled={!results.length}
             >
               Download CSV
             </button>
           </form>
           {error && <p className="text-red-600 text-sm mt-2">{error}</p>}
-          <p className="text-xs text-gray-400 mt-2">
-            Your results will appear below and be available for CSV download.
-          </p>
+          <p className="text-xs text-gray-400 mt-2">Your results will appear below and be available for CSV download.</p>
         </section>
 
-        {/* Results */}
         <section className="bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-bold text-gray-800 mb-4">Your Recent Results</h2>
           {!results.length ? (
@@ -186,7 +169,7 @@ export default function UserDashboard() {
               </thead>
               <tbody>
                 {results.map((r) => (
-                  <tr key={String(r.ig_id ?? r.username)} className="border-t">
+                  <tr key={String((r.username || '').toLowerCase())} className="border-t">
                     <td className="py-2">@{r.username || r.ig_id}</td>
                     <td>{Array.isArray(r.emails) ? r.emails.join(', ') : '—'}</td>
                     <td>{r.followers ?? '—'}</td>

@@ -8,38 +8,38 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1) Auth: get the signed-in user
     const supabase = createServerSupabaseClient({ req, res });
     const {
       data: { session },
       error: sessionErr,
     } = await supabase.auth.getSession();
 
-    if (sessionErr) {
-      console.error('getSession error:', sessionErr);
+    if (sessionErr || !session?.user?.id) {
       return res.status(401).json({ error: 'unauthorized' });
     }
-    const userId = session?.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: 'unauthorized' });
-    }
+    const userId = session.user.id;
 
-    // 2) Validate input
-    const { q, limit, exclude } = (req.body || {});
+    const {
+      q,
+      limit,
+      exclude,
+      exclude_usernames,  // pass-through from client
+      after,              // optional pass-through
+    } = req.body || {};
+
     if (!q || typeof q !== 'string' || !q.trim()) {
       return res.status(400).json({ error: 'missing_query' });
     }
 
     const safeLimit = Math.min(Math.max(parseInt(limit || 10, 10), 1), 50);
-    const safeExclude =
-      Array.isArray(exclude) ? exclude.map(String).filter(Boolean) : [];
+    const safeExclude = Array.isArray(exclude) ? exclude.map(String).filter(Boolean) : [];
+    const safeExcludeUsernames = Array.isArray(exclude_usernames)
+      ? exclude_usernames.map((x) => String(x || '').toLowerCase()).filter(Boolean)
+      : [];
+    const safeAfter = typeof after === 'string' && after ? after : undefined;
 
-    // 3) Call the VPS API
-    const base = process.env.VPS_API_BASE; // e.g. https://api.leads4ig.com
-    if (!base) {
-      console.error('VPS_API_BASE is missing from environment');
-      return res.status(500).json({ error: 'server_misconfig' });
-    }
+    const base = process.env.VPS_API_BASE;
+    if (!base) return res.status(500).json({ error: 'server_misconfig' });
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
@@ -52,34 +52,24 @@ export default async function handler(req, res) {
         q: q.trim(),
         limit: safeLimit,
         exclude: safeExclude,
+        exclude_usernames: safeExcludeUsernames,
+        after: safeAfter,
       }),
       signal: controller.signal,
     }).catch((e) => {
-      // fetch throws on abort / network errors
       throw new Error(`vps_fetch_failed: ${e.message}`);
     });
 
     clearTimeout(timeout);
 
-    const payload = await vpsResp
-      .json()
-      .catch(() => ({ error: 'invalid_json_from_vps' }));
-
+    const payload = await vpsResp.json().catch(() => ({ error: 'invalid_json_from_vps' }));
     if (!vpsResp.ok) {
-      // Bubble up VPS error for visibility in DevTools
-      return res.status(vpsResp.status).json({
-        error: 'vps_error',
-        status: vpsResp.status,
-        detail: payload,
-      });
+      return res.status(vpsResp.status).json({ error: 'vps_error', detail: payload });
     }
 
-    // 4) Return results to the client
     return res.status(200).json(payload);
   } catch (e) {
     console.error('API /search error:', e);
-    const message =
-      typeof e?.message === 'string' ? e.message : 'internal_error';
-    return res.status(500).json({ error: 'server_error', detail: message });
+    return res.status(500).json({ error: 'server_error' });
   }
 }
