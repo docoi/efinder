@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 
+// small helper to avoid duplicates in the table
 function dedupeById(list) {
   const seen = new Set();
   const out = [];
@@ -12,15 +13,16 @@ function dedupeById(list) {
   return out;
 }
 
-export default function UserDashboard({ user }) {
+export default function UserDashboard() {
   const [credits, setCredits] = useState(null);
-  const [plan] = useState('Professional ($29/mo)'); // placeholder, wire to Stripe later
+  const [plan] = useState('Professional ($29/mo)'); // placeholder
   const [q, setQ] = useState('');
   const [limit, setLimit] = useState(10);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState([]);
   const [error, setError] = useState('');
 
+  // pull current credits
   async function fetchCredits() {
     try {
       const r = await fetch('/api/me/credits');
@@ -34,31 +36,45 @@ export default function UserDashboard({ user }) {
 
   useEffect(() => { fetchCredits(); }, []);
 
+  // main search
   async function onSearch(e) {
-    e.preventDefault();
+    e?.preventDefault?.();
     if (!q) return;
     setLoading(true);
     setError('');
+
     try {
+      // send ig_ids we already have so VPS skips them and does not re-charge
+      const exclude = (results || [])
+        .map(r => String(r?.ig_id ?? ''))
+        .filter(Boolean);
+
       const r = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q, limit: Number(limit) || 10 }),
+        body: JSON.stringify({
+          q,
+          limit: Number(limit) || 10,
+          exclude,
+        }),
       });
+
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || 'Search failed');
 
-      const newResults = Array.isArray(j.results) ? j.results : [];
-      // Append and de-dupe so 1 then 2 => 3 total
-      setResults(prev => dedupeById([...(prev || []), ...newResults]));
-      await fetchCredits(); // refresh balance after deduction
+      const newRows = Array.isArray(j.results) ? j.results : [];
+      setResults(prev => dedupeById([...(prev || []), ...newRows]));
+
+      // credits are deducted on the VPS for *new* emails only; refresh the display
+      await fetchCredits();
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Search failed');
     } finally {
       setLoading(false);
     }
   }
 
+  // CSV export of everything currently in the table
   async function onExport() {
     if (!results.length) return;
     const r = await fetch('/api/export-csv', {
@@ -84,7 +100,6 @@ export default function UserDashboard({ user }) {
             <h1 className="text-3xl font-bold text-gray-800">Welcome back 👋</h1>
             <p className="text-gray-500">Here’s your dashboard to manage searches, credits, and billing.</p>
           </div>
-          {/* removed unused Logout button */}
         </header>
 
         {/* Stat Cards */}
@@ -96,11 +111,13 @@ export default function UserDashboard({ user }) {
             </p>
             <p className="text-xs text-gray-400">Resets monthly</p>
           </div>
+
           <div className="bg-white shadow rounded-lg p-5">
             <h2 className="text-sm font-medium text-gray-500 mb-1">Current Plan</h2>
             <p className="text-xl font-semibold text-gray-800">{plan}</p>
             <button className="mt-2 text-sm text-blue-600 hover:underline">Upgrade or Change</button>
           </div>
+
           <div className="bg-white shadow rounded-lg p-5">
             <h2 className="text-sm font-medium text-gray-500 mb-1">Download Invoices</h2>
             <button className="mt-2 px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition">
@@ -116,7 +133,7 @@ export default function UserDashboard({ user }) {
           <form onSubmit={onSearch} className="flex flex-col md:flex-row gap-4">
             <input
               type="text"
-              placeholder="Enter @username or keyword e.g. Beauty"
+              placeholder="Enter @username or keyword e.g. florist"
               className="w-full px-4 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -147,7 +164,9 @@ export default function UserDashboard({ user }) {
             </button>
           </form>
           {error && <p className="text-red-600 text-sm mt-2">{error}</p>}
-          <p className="text-xs text-gray-400 mt-2">Your results will appear below and be available for CSV download.</p>
+          <p className="text-xs text-gray-400 mt-2">
+            Your results will appear below and be available for CSV download.
+          </p>
         </section>
 
         {/* Results */}

@@ -1,150 +1,46 @@
 // pages/api/search.js
-import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
+import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
+import { cookies } from 'next/headers';
 
-/** Robustly normalize many possible “emails” field shapes into a JS array */
-function toEmailArray(v) {
-  if (Array.isArray(v)) return v.filter(Boolean);
-
-  if (v == null) return [];
-
-  if (typeof v === 'string') {
-    const s = v.trim();
-
-    // 1) Try JSON string: '["a@x.com","b@y.com"]'
-    try {
-      const j = JSON.parse(s);
-      if (Array.isArray(j)) return j.filter(Boolean);
-    } catch (_) {
-      /* not JSON, keep going */
-    }
-
-    // 2) Try Postgres text[]: '{a@x.com,"b@y.com"}'
-    if (s.startsWith('{') && s.endsWith('}')) {
-      return s
-        .slice(1, -1) // remove { }
-        .split(',')
-        .map(x => x.trim().replace(/^"(.*)"$/, '$1')) // unquote
-        .filter(Boolean);
-    }
-  }
-
-  return [];
-}
+const VPS_API_BASE = process.env.VPS_API_BASE || 'https://api.leads4ig.com';
 
 export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'method_not_allowed' });
+  }
+
   try {
-    if (req.method !== 'POST') {
-      res.setHeader('Allow', ['POST']);
-      return res.status(405).json({ error: 'method_not_allowed' });
+    // Auth (required for user_id and RLS)
+    const supabase = createRouteHandlerClient({ cookies });
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user?.id) {
+      return res.status(401).json({ error: 'unauthorized' });
     }
 
-    // ---- parse & validate input
-    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
-    let { q = '', limit = 3 } = body;
-    q = String(q || '').trim();
-    limit = Math.max(1, Math.min(50, parseInt(limit, 10) || 1));
-    if (!q) return res.status(400).json({ error: 'missing_q' });
+    const { q, limit, exclude } = req.body || {};
+    const safeLimit = Math.max(1, Math.min(Number(limit || 10), 50));
 
-    // ---- supabase (SSR) + session
-    const supabase = createServerSupabaseClient({ req, res });
-    const { data: { session } } = await supabase.auth.getSession();
-    const userId = session?.user?.id || null;
-    if (!userId) return res.status(401).json({ error: 'unauthorized' });
+    const payload = {
+      user_id: session.user.id,
+      q: String(q || '').trim(),
+      limit: safeLimit,
+      exclude: Array.isArray(exclude) ? exclude.map(String) : [],
+    };
 
-    // ---- env check
-    const vps = process.env.VPS_API_BASE;
-    if (!vps) return res.status(500).json({ error: 'missing_env', detail: 'VPS_API_BASE is not set' });
-
-    // ---- ask VPS for cached results first
-    const r = await fetch(`${vps}/search`, {
+    const resp = await fetch(`${VPS_API_BASE}/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        q,
-        limit,
-        user_id: userId, // VPS uses for logging/auditing only
-      }),
+      body: JSON.stringify(payload),
     });
 
-    if (!r.ok) {
-      const text = await r.text();
-      return res.status(502).json({ error: 'vps_failed', status: r.status, details: text.slice(0, 500) });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      return res.status(resp.status).json(data || { error: 'vps_error' });
     }
 
-    const json = await r.json();
-    // Support both shapes:
-    // 1) { results:[...], source:{cache:<n>, vps:<m>}, emailsDelivered:<n> }
-    // 2) legacy: [...]  (treat as results array)
-    const results = Array.isArray(json) ? json : (Array.isArray(json.results) ? json.results : []);
-    const source  = Array.isArray(json) ? {}   : (json.source || {});
-    let emailsDelivered = Array.isArray(json) ? undefined : (json.emailsDelivered ?? undefined);
-
-    // ---- normalize rows for deliveries upsert + count emails if not provided
-    const deliveryRows = [];
-    let computedEmails = 0;
-
-    for (const l of results) {
-      // Merge any of the possible email fields we might receive
-      const emails = [
-        ...toEmailArray(l.emails),
-        ...toEmailArray(l.emails_json),
-        ...toEmailArray(l.emails_primary_json),
-        ...toEmailArray(l.emails_related_json),
-      ];
-      const uniqueEmails = [...new Set(emails)];
-
-      const charge = uniqueEmails.length;
-      computedEmails += charge;
-
-      deliveryRows.push({
-        user_id: userId,
-        ig_id: String(l.ig_id),
-        credits_charged: charge,
-        is_trial: false,
-      });
-    }
-
-    if (typeof emailsDelivered !== 'number') emailsDelivered = computedEmails;
-
-    // ---- upsert deliveries (no dupes per (user_id, ig_id))
-    if (deliveryRows.length) {
-      const { error: upsertErr } = await supabase
-        .from('deliveries')
-        .upsert(deliveryRows, { onConflict: 'user_id,ig_id', ignoreDuplicates: true });
-      if (upsertErr) console.error('deliveries upsert error', upsertErr);
-    }
-
-    // ---- deduct credits if any were actually delivered
-    if (emailsDelivered > 0) {
-      const { error: rpcErr } = await supabase.rpc('deduct_credits', { uid: userId, n: emailsDelivered });
-      if (rpcErr) console.error('deduct_credits error', rpcErr);
-    }
-
-    // ---- fire-and-forget "top-up" if cache didn’t meet the request
-    const shortfall = Math.max(0, Number(limit) - results.length);
-    if (shortfall > 0) {
-      try {
-        const exclude = results.map((r) => String(r.ig_id));
-        // This does not block the user; VPS enqueues scraping and upserts into public.leads
-        fetch(`${vps}/discover`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ q, limit: shortfall, exclude }),
-        }).catch(() => {});
-      } catch (e) {
-        // never block the main path
-        console.warn('top-up discover fire-and-forget failed', e);
-      }
-    }
-
-    // ---- respond to client
-    return res.status(200).json({
-      results,
-      emailsDelivered,
-      source,
-    });
+    return res.status(200).json(data);
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: 'internal_error', message: String(e).slice(0, 500) });
+    console.error('search api error', e);
+    return res.status(500).json({ error: 'server_error' });
   }
 }
