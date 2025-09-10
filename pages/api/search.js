@@ -1,6 +1,36 @@
 // pages/api/search.js
 import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs';
 
+/** Robustly normalize many possible “emails” field shapes into a JS array */
+function toEmailArray(v) {
+  if (Array.isArray(v)) return v.filter(Boolean);
+
+  if (v == null) return [];
+
+  if (typeof v === 'string') {
+    const s = v.trim();
+
+    // 1) Try JSON string: '["a@x.com","b@y.com"]'
+    try {
+      const j = JSON.parse(s);
+      if (Array.isArray(j)) return j.filter(Boolean);
+    } catch (_) {
+      /* not JSON, keep going */
+    }
+
+    // 2) Try Postgres text[]: '{a@x.com,"b@y.com"}'
+    if (s.startsWith('{') && s.endsWith('}')) {
+      return s
+        .slice(1, -1) // remove { }
+        .split(',')
+        .map(x => x.trim().replace(/^"(.*)"$/, '$1')) // unquote
+        .filter(Boolean);
+    }
+  }
+
+  return [];
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
@@ -32,7 +62,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         q,
         limit,
-        user_id: userId, // VPS may use this only for logging/auditing; no secrets exposed
+        user_id: userId, // VPS uses for logging/auditing only
       }),
     });
 
@@ -46,7 +76,7 @@ export default async function handler(req, res) {
     // 1) { results:[...], source:{cache:<n>, vps:<m>}, emailsDelivered:<n> }
     // 2) legacy: [...]  (treat as results array)
     const results = Array.isArray(json) ? json : (Array.isArray(json.results) ? json.results : []);
-    const source = Array.isArray(json) ? {} : (json.source || {});
+    const source  = Array.isArray(json) ? {}   : (json.source || {});
     let emailsDelivered = Array.isArray(json) ? undefined : (json.emailsDelivered ?? undefined);
 
     // ---- normalize rows for deliveries upsert + count emails if not provided
@@ -54,14 +84,16 @@ export default async function handler(req, res) {
     let computedEmails = 0;
 
     for (const l of results) {
-      const primary = Array.isArray(l.emails_primary_json) ? l.emails_primary_json : [];
-      const related = Array.isArray(l.emails_related_json) ? l.emails_related_json : [];
-      const emails =
-        Array.isArray(l.emails) ? l.emails :
-        Array.isArray(l.emails_json) ? l.emails_json : // in case your VPS used a different field
-        [...primary, ...related];
+      // Merge any of the possible email fields we might receive
+      const emails = [
+        ...toEmailArray(l.emails),
+        ...toEmailArray(l.emails_json),
+        ...toEmailArray(l.emails_primary_json),
+        ...toEmailArray(l.emails_related_json),
+      ];
+      const uniqueEmails = [...new Set(emails)];
 
-      const charge = Array.isArray(emails) ? emails.length : 0;
+      const charge = uniqueEmails.length;
       computedEmails += charge;
 
       deliveryRows.push({
@@ -93,7 +125,7 @@ export default async function handler(req, res) {
     if (shortfall > 0) {
       try {
         const exclude = results.map((r) => String(r.ig_id));
-        // This does not block the user; your VPS should enqueue scraping and upsert into public.leads
+        // This does not block the user; VPS enqueues scraping and upserts into public.leads
         fetch(`${vps}/discover`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
